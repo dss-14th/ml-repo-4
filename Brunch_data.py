@@ -12,7 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-# 1. Data 기본 전처리 및 [2019.01.29-2019.03.01]최신 기간 등록된 글로 Train 및 추천
+# 1. Data 기본 전처리 및 [2019.02.15-2019.03.31]최신 기간 등록된 글로 Train 및 추천
 class Data():
     def __init__(self, meta, read_file_list, magazine, users):
         self.meta = meta
@@ -25,6 +25,7 @@ class Data():
         self.meta.rename(columns={"user_id": "author_id", "id": "article_id"}, inplace=True)
         self.magazine.rename(columns={"id": "magazine_id"}, inplace=True)
         self.users.rename(columns={"id": "readers_id", "keyword_list": "search_keyword_list"}, inplace=True)
+        self.meta["type"] = self.meta["magazine_id"].apply(lambda x: "개인" if x == 0.0 else "매거진")
 
         read_df_lst = []
         for file in self.read_list:
@@ -41,20 +42,24 @@ class Data():
                              "hr": np.repeat(read_df["hr"], read_count),
                              "readers_id": np.repeat(read_df["readers_id"], read_count),
                              "article_id": list(chain.from_iterable(read_df["article_id"].str.split(" ")))})
+        
+        del read_df, read_count
         return self.meta, self.read, self.magazine, self.users
 
-    ## 최신 기간에 등록된 글로만 추천 [2019.01.29-2019.03.01] (Train_data 만들기)
+    ## 최신 기간에 등록된 글로만 추천 [2019.02.15-2019.03.31] (Train_data 만들기)
     def train_data(self):
         self.meta["reg_datetime"] = self.meta["reg_ts"].apply(lambda x: datetime.fromtimestamp(x/1000.0))
         self.meta["reg_dt"] = self.meta["reg_datetime"].dt.date
         self.meta.drop(columns=["display_url", "sub_title", "title"], inplace=True)
 
-        metadata_train = self.meta[(self.meta.reg_datetime >= datetime(2019, 1, 29))&(self.meta.reg_datetime <= datetime(2019, 3, 1))]
+        metadata_train = self.meta[(self.meta.reg_datetime >= datetime(2019, 2, 15))&(self.meta.reg_datetime <= datetime(2019, 3, 31))]
         
-        self.train = pd.merge(left=metadata_train, right=self.read, left_on="article_id", right_on="article_id", how="inner")
+        self.train = pd.merge(left=metadata_train, right=self.read, left_on="article_id", right_on="article_id", how="left")
 
         self.train.drop(columns=["reg_ts", "reg_datetime"], inplace=True)
         self.train.rename(columns={"dt":"read_dt", "hr":"read_hr"}, inplace=True)
+        
+        del metadata_train
 
         return self.train
     
@@ -96,17 +101,63 @@ class Read_article_outline_remove():
         
     
 # 3. readers_article_list 건수별 나누기 [1: 1건, 2: 2-4건, 3: 5-11건, 4: 12-25건]
-def article_count_division_1(data):
+def ra_article_count_division_1(data):
+    """
+    function : Divide ra(up) dataframe by 1 read
+    input : readers_article_list Dataframe,  upper_fence Dataframe
+    output : division dataframe (article count == 1)
+    """
     return data[data["article_id_count"] == 1]
-def article_count_division_2(data):
-    return data[(data["article_id_count"] >= 2) & (data["article_id_count"] <= 4)]
-def article_count_division_3(data):
-    return data[(data["article_id_count"] >= 5) & (data["article_id_count"] <= 11)]
-def article_count_division_4(data):
-    return data[(data["article_id_count"] >= 12) & (data["article_id_count"] <= 25)]
+
+def ra_article_count_division_2(data):
+    """
+    function : Divide ra(up) dataframe into 2 to 8 reads
+    input : readers_article_list Dataframe,  upper_fence Dataframe
+    output : division dataframe (article count == 2-8)
+    """    
+    return data[(data["article_id_count"] >= 2) & (data["article_id_count"] <= 8)]
+
+def ra_article_count_division_3(data):
+    """
+    function : Divide ra(up) dataframe into 9 to 27 reads
+    input : readers_article_list Dataframe,  upper_fence Dataframe
+    output : division dataframe (article count == 9-27)
+    """    
+    return data[(data["article_id_count"] >= 9) & (data["article_id_count"] <= 27)]
+
+def ra_article_count_division_4(data):
+    """
+    function : Divide ra(up) dataframe into 28 to 64 reads    
+    input : readers_article_list Dataframe,  upper_fence Dataframe
+    output : division dataframe (article count == 28-64)
+    """    
+    return data[(data["article_id_count"] >= 28) & (data["article_id_count"] <= 64)]
+
+#4. train들어올때 건수별 나누기 만들기
+def train_article_count_division(data, start_count, stop_count):
+    """
+    function : division train dataframe by number of read
+    input : train Dataframe
+    output : division train
+    arguments : data, start_count, stop_count
+    
+    - min : 1
+    - 25% : 2
+    - 50% : 8 
+    - 75% : 27 
+    - upper fence : 64.5 (round down : 64)
+
+    => unread : 0
+    => min-50% : 1-8 (1 / 2-8)
+    => 50%-upper fence : 9-64 (9-27 / 28-64)
+    => upper-fence-max : 65-21059
+    """
+    read_count = data.groupby('readers_id').count().article_id
+    group = data[data["readers_id"].isin(read_count[(read_count >= start_count)&(read_count <= stop_count)].index)]    
+    return group
 
 
-# 4. readers_article_list Data와 다른 Data의 merge를 통한 새로운 DataFrame 생성
+# 5. readers_article_list Data와 다른 Data의 merge를 통한 새로운 DataFrame 생성
 class New_data():
     def __init__(self, data):
         self.data = data
@@ -120,6 +171,10 @@ class New_data():
         df1 = pd.merge(left=self.read, right=self.meta, left_on="article_id", right_on="article_id", how="inner")
         df2 = pd.merge(left=self.data, right=df1, left_on="readers_id", right_on="readers_id", how="left")
         self.df3 = pd.merge(left=df2, right=self.maga, left_on="magazine_id", right_on="magazine_id", how="left")
+        self.df3 = self.df3.drop_duplicates(["readers_id", "article_id", "reg_datetime"])
+        
+        del df1, df2
+        
         return self.df3
         
     ## readers_article_list와 readers별 searching_keyword, Following_list 데이터 생성
@@ -131,4 +186,15 @@ class New_data():
     ## readers_article_list와 article별 magazine_id, readers별 searching_keyword, Following_list 데이터 생성
     def ra_total_df(self):
         df5 = pd.merge(left=self.df3, right=self.df4, left_on="readers_id", right_on="readers_id", how="inner")
+        df5.rename(columns={"article_list_x":"article_list", "article_id_count_x":"article_id_count"}, inplace=True)
+        df5.drop(columns=["reg_ts", "article_list_y", "article_id_count_y"], inplace=True)
+        df5 = df5.drop_duplicates(["readers_id", "article_id", "reg_datetime"])
+        
         return df5
+    
+# 6. 인기글 추천해주는 Data 
+def popular_weight_data(train)
+    popular = train.groupby("article_id").nunique().readers_id.sort_values(ascending=False)
+    for i in popular.index:
+        train.loc[train["article_id"]== i,"popular_weight"] = popular[i]
+    return train
