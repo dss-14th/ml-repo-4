@@ -7,7 +7,6 @@ from datetime import timedelta, datetime
 import glob
 from itertools import chain
 import json
-import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -20,11 +19,12 @@ class Data():
         self.magazine = magazine
         self.users = users
         
-    def data_preprocessing(self):
+    def data_preprocessing(self, dev):
         self.meta.drop(columns="article_id", inplace=True)
         self.meta.rename(columns={"user_id": "author_id", "id": "article_id"}, inplace=True)
         self.magazine.rename(columns={"id": "magazine_id"}, inplace=True)
         self.users.rename(columns={"id": "readers_id", "keyword_list": "search_keyword_list"}, inplace=True)
+        self.users = self.users[~self.users.readers_id.isin(list(dev.readers_id))]
         self.meta["type"] = self.meta["magazine_id"].apply(lambda x: "개인" if x == 0.0 else "매거진")
 
         read_df_lst = []
@@ -44,17 +44,25 @@ class Data():
                              "article_id": list(chain.from_iterable(read_df["article_id"].str.split(" ")))})
         
         del read_df, read_count
+        
         return self.meta, self.read, self.magazine, self.users
-
+    
+    ## dev에 맞춰 Test데이터 뽑기
+    def test_data(self, dev):
+        self.test_data = pd.merge(left=self.meta, right=self.read[self.read.readers_id.isin(list(dev.readers_id))], 
+                             left_on="article_id", right_on="article_id", how="right")
+        self.read = self.read[~self.read.readers_id.isin(list(dev.readers_id))]
+        return self.test_data
+    
     ## 최신 기간에 등록된 글로만 추천 [2019.02.15-2019.03.31] (Train_data 만들기)
-    def train_data(self):
+    def train_data(self):        
         self.meta["reg_datetime"] = self.meta["reg_ts"].apply(lambda x: datetime.fromtimestamp(x/1000.0))
         self.meta["reg_dt"] = self.meta["reg_datetime"].dt.date
         self.meta.drop(columns=["display_url", "sub_title", "title"], inplace=True)
 
         metadata_train = self.meta[(self.meta.reg_datetime >= datetime(2019, 2, 15))&(self.meta.reg_datetime <= datetime(2019, 3, 31))]
         
-        self.train = pd.merge(left=metadata_train, right=self.read, left_on="article_id", right_on="article_id", how="left")
+        self.train = pd.merge(left=metadata_train, right=self.read, left_on="article_id", right_on="article_id", how="inner")
 
         self.train.drop(columns=["reg_ts", "reg_datetime"], inplace=True)
         self.train.rename(columns={"dt":"read_dt", "hr":"read_hr"}, inplace=True)
@@ -134,12 +142,12 @@ def ra_article_count_division_4(data):
     return data[(data["article_id_count"] >= 28) & (data["article_id_count"] <= 64)]
 
 #4. train들어올때 건수별 나누기 만들기
-def train_article_count_division(data, start_count, stop_count):
+def train_article_count_division(input_data, start_count, stop_count, output_data):
     """
     function : division train dataframe by number of read
-    input : train Dataframe
+    input : train Dataframe, target Dataframe
     output : division train
-    arguments : data, start_count, stop_count
+    arguments : input_data, start_count, stop_count, output_data
     
     - min : 1
     - 25% : 2
@@ -152,10 +160,9 @@ def train_article_count_division(data, start_count, stop_count):
     => 50%-upper fence : 9-64 (9-27 / 28-64)
     => upper-fence-max : 65-21059
     """
-    read_count = data.groupby('readers_id').count().article_id
-    group = data[data["readers_id"].isin(read_count[(read_count >= start_count)&(read_count <= stop_count)].index)]    
+    read_count = input_data.groupby('readers_id').count().article_id
+    group = output_data[output_data["readers_id"].isin(read_count[(read_count >= start_count)&(read_count <= stop_count)].index)]    
     return group
-
 
 # 5. readers_article_list Data와 다른 Data의 merge를 통한 새로운 DataFrame 생성
 class New_data():
@@ -193,7 +200,7 @@ class New_data():
         return df5
     
 # 6. 인기글 추천해주는 Data 
-def popular_weight_data(train)
+def popular_weight_data(train):
     popular = train.groupby("article_id").nunique().readers_id.sort_values(ascending=False)
     for i in popular.index:
         train.loc[train["article_id"]== i,"popular_weight"] = popular[i]
